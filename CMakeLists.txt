@@ -5,7 +5,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-
+add_compile_options(-ggdb)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -16,22 +16,20 @@ find_package(ament_cmake REQUIRED)
 # Find packages
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(PCL REQUIRED)
-find_package(pcl_ros REQUIRED)
+find_package(OpenCV REQUIRED)
 
 set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} $ENV{HOME}/freenect2/lib/cmake/freenect2)
 
 find_package(freenect2 REQUIRED)
 
 # Include directories
-include_directories(include ${PCL_INCLUDE_DIRS})
 include_directories($ENV{HOME}/freenect2/include)
 
 # Create an executable
 add_executable(kinect_node src/kinect_publisher.cpp)
 
 # Specify dependencies of the executable
-ament_target_dependencies(kinect_node rclcpp sensor_msgs PCL freenect2 pcl_ros)
+ament_target_dependencies(kinect_node rclcpp sensor_msgs freenect2 OpenCV)
 
 # Link libraries
 target_link_libraries(kinect_node ${PCL_LIBRARIES} ${freenect2_LIBRARIES})
