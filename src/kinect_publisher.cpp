@@ -9,8 +9,6 @@
 #include <string.h>
 #include <opencv2/opencv.hpp>
 
-#include <iostream>
-
 unsigned int syncType = libfreenect2::Frame::Color | libfreenect2::Frame::Ir | libfreenect2::Frame::Depth;
 
 class KinectNode : public rclcpp::Node
@@ -18,6 +16,8 @@ class KinectNode : public rclcpp::Node
 public:
   KinectNode() : Node("kinect_node")
   {
+    //Initialize libfreenect2
+    deviceFound = false;
     pipeline = std::make_unique<libfreenect2::OpenGLPacketPipeline>();
 
     if(freenect2.enumerateDevices() == 0)
@@ -64,15 +64,21 @@ public:
     double rate_hz = 30.0;
     timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<int>(1000.0 / rate_hz)),
                                      std::bind(&KinectNode::publishData, this));
+
+    deviceFound = true;
   }
 
   ~KinectNode()
   {
     RCLCPP_INFO(this->get_logger(), "Stopping Kinect device");
-    listener.release(frames);
-    
-    dev->stop();
-    dev->close();
+
+    //Close device if it was initialized
+    if(deviceFound)
+    {
+      listener.release(frames);
+      dev->stop();
+      dev->close();
+    }
 
     RCLCPP_INFO(this->get_logger(), "Stopped Kinect device");
   }
@@ -80,6 +86,7 @@ public:
 private:
   void publishData()
   {
+    //Pull frame data
     if (!listener.waitForNewFrame(frames, 10*1000)) // 10 sconds
     {
       std::cout << "timeout!" << std::endl;
@@ -92,6 +99,7 @@ private:
 
     registration->apply(rgb, depth, &undistorted, &registered);
 
+    //Create the RGB image message and copy the kinect data into it
     auto image_msg = std::make_unique<sensor_msgs::msg::Image>();
     image_msg->header.stamp = this->now();
     image_msg->width = rgb->width;
@@ -101,12 +109,14 @@ private:
     image_msg->data.resize(rgb->width * rgb->height * rgb->bytes_per_pixel);
     memcpy(image_msg->data.data(), rgb->data, rgb->width * rgb->height * rgb->bytes_per_pixel);
 
+    //Crop and resize the rgb image to match the depth image
     cv::Mat original_image(rgb->height, rgb->width, CV_8UC4, rgb->data);
     cv::Mat resized_image;
     cv::Rect roi(350, 0, 1450, 1080);
     cv::Mat cropped_image = original_image(roi);
     cv::resize(cropped_image, resized_image, cv::Size(512, 424));
 
+    //Create the RGB rectified image message and copy the kinect data into it
     auto rgb_rect_msg = std::make_unique<sensor_msgs::msg::Image>();
     rgb_rect_msg->header.stamp = this->now();
     rgb_rect_msg->header.frame_id = "kinect_link";
@@ -117,6 +127,7 @@ private:
     rgb_rect_msg->data.resize(depth->width * depth->height * 4); 
     memcpy(rgb_rect_msg->data.data(), resized_image.data, depth->width * depth->height * 4);
 
+    //Create the camera info message
     auto camera_info_msg = std::make_unique<sensor_msgs::msg::CameraInfo>();
     camera_info_msg->header.stamp = this->now();
     camera_info_msg->header.frame_id = "kinect_link";
@@ -124,11 +135,12 @@ private:
     camera_info_msg->height = depth->height;
     camera_info_msg->distortion_model = "plumb_bob";
     camera_info_msg->d.resize(5);
-    camera_info_msg->d = {0.012947732047700113, -0.016278227805096242, 0.0020719045565612245, -0.0012254560479249, 0.0};
-    camera_info_msg->k = {362.02061428537024, 0.0, 210.76517637501865, 0.0, 405.17059240104345, 211.97321671296146, 0.0, 0.0, 1.0};
-    camera_info_msg->r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-    camera_info_msg->p = {361.9730224609375, 0.0, 209.32856710752822, 0.0, 0.0, 405.724365234375, 212.33942579256836, 0.0, 0.0, 0.0, 1.0, 0.0};
+    memcpy(camera_info_msg->d.data(), cameraInfoDMatrix, 5 * sizeof(double));
+    memcpy(camera_info_msg->k.data(), cameraInfoKMatrix, 9 * sizeof(double));
+    memcpy(camera_info_msg->p.data(), cameraInfoPMatrix, 12 * sizeof(double));
+    memcpy(camera_info_msg->r.data(), cameraInfoRMatrix, 9 * sizeof(double));
 
+    //Create the depth image message and copy the kinect data into it
     auto depth_msg = std::make_unique<sensor_msgs::msg::Image>();
     depth_msg->header.stamp = this->now();
     depth_msg->width = depth->width;
@@ -138,6 +150,7 @@ private:
     depth_msg->data.resize(depth->width * depth->height * depth->bytes_per_pixel);
     memcpy(depth_msg->data.data(), depth->data, depth->width * depth->height * depth->bytes_per_pixel);
 
+    //Create the IR image message and copy the kinect data into it
     auto ir_msg = std::make_unique<sensor_msgs::msg::Image>();
     ir_msg->header.stamp = this->now();
     ir_msg->width = ir->width;
@@ -147,7 +160,7 @@ private:
     ir_msg->data.resize(ir->width * ir->height * ir->bytes_per_pixel);
     memcpy(ir_msg->data.data(), ir->data, ir->width * ir->height * ir->bytes_per_pixel);
 
-
+    //Publish the messages
     rgb_pub_->publish(std::move(image_msg));
     depth_pub_->publish(std::move(depth_msg));
     rgb_rect_pub_->publish(std::move(rgb_rect_msg));
@@ -158,23 +171,35 @@ private:
 
   }
 
+    bool deviceFound;
+
+    //libfreenect2 variables
     libfreenect2::Freenect2Device *dev;
     std::unique_ptr<libfreenect2::PacketPipeline> pipeline;
+    std::unique_ptr<libfreenect2::Registration> registration;
     libfreenect2::Freenect2 freenect2;
+    libfreenect2::FrameMap frames;
     std::string serial;
 
+    //TODO Put these definitions in the constructor, doing it currently leads to errors
+    libfreenect2::Frame undistorted = libfreenect2::Frame(512, 424, 4), registered = libfreenect2::Frame(512, 424, 4);
     libfreenect2::SyncMultiFrameListener listener = libfreenect2::SyncMultiFrameListener(syncType);
 
-    libfreenect2::FrameMap frames;
-    std::unique_ptr<libfreenect2::Registration> registration;
-    libfreenect2::Frame undistorted = libfreenect2::Frame(512, 424, 4), registered = libfreenect2::Frame(512, 424, 4);
 
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr ir_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_rect_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
-  rclcpp::TimerBase::SharedPtr timer_;
+    //Camera calibration parameters
+    double cameraInfoDMatrix[5] = {0.012947732047700113, -0.016278227805096242, 0.0020719045565612245, -0.0012254560479249, 0.0};
+    double cameraInfoKMatrix[9] = {362.02061428537024, 0.0, 210.76517637501865, 0.0, 405.17059240104345, 211.97321671296146, 0.0, 0.0, 1.0};
+    double cameraInfoRMatrix[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0 ,0.0, 1.0};
+    double cameraInfoPMatrix[12] = {361.9730224609375, 0.0, 209.32856710752822, 0.0, 0.0, 405.724365234375, 212.33942579256836, 0.0, 0.0, 0.0, 1.0, 0.0};
+
+
+    //ROS Publishers and Timer
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr ir_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_rect_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
+    rclcpp::TimerBase::SharedPtr timer_;
 };
 
 int main(int argc, char** argv)
