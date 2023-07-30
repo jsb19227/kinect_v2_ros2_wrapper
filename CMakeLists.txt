@@ -16,7 +16,6 @@ find_package(ament_cmake REQUIRED)
 # Find packages
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(OpenCV REQUIRED)
 
 set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} $ENV{HOME}/freenect2/lib/cmake/freenect2)
 
@@ -24,18 +23,20 @@ find_package(freenect2 REQUIRED)
 
 # Include directories
 include_directories($ENV{HOME}/freenect2/include)
+include_directories(include)
 
 # Create an executable
-add_executable(kinect_node src/kinect_publisher.cpp)
+add_executable(kinect2_node src/kinect2_driver.cpp)
 
 # Specify dependencies of the executable
-ament_target_dependencies(kinect_node rclcpp sensor_msgs freenect2 OpenCV)
+ament_target_dependencies(kinect2_node rclcpp sensor_msgs freenect2)
 
 # Link libraries
-target_link_libraries(kinect_node ${PCL_LIBRARIES} ${freenect2_LIBRARIES})
+target_link_libraries(kinect2_node  ${freenect2_LIBRARIES})
 
 # Install executable
-install(TARGETS kinect_node
+install(TARGETS  
+        kinect2_node
         DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
