@@ -1,12 +1,16 @@
 #include "kinect2_driver.hpp"
 
-Kinect2Node::Kinect2Node() : Node("kinect2_node"), listener(defaultSyncType)
+Kinect2Node::Kinect2Node() : Node("kinect2_node")
 {
+    //Default Constructor
+
+    RCLCPP_INFO(this->get_logger(), "Initializing Kinect2Node");
+
     this->deviceFound = false;
     this->pipeline = 0;
 
-    std::string pipelineType = this->declare_parameter<std::string>("pipeline_type", "cpu");
-
+    //Parameter for selecting the pipeline type, if you select a pipeline that is not supported, an exception will be thrown
+    std::string pipelineType = this->declare_parameter<std::string>("pipeline_type", "");
     try
     {
         this->createPacketPipeline(pipelineType);
@@ -17,6 +21,7 @@ Kinect2Node::Kinect2Node() : Node("kinect2_node"), listener(defaultSyncType)
         throw e;
     }
 
+    //Check to see if there are any devices connected
     if(this->freenect2.enumerateDevices() == 0)
     {
         RCLCPP_ERROR(this->get_logger(), "No Kinect devices found!");
@@ -27,8 +32,11 @@ Kinect2Node::Kinect2Node() : Node("kinect2_node"), listener(defaultSyncType)
         RCLCPP_INFO(this->get_logger(), "Found %d Kinect devices", this->freenect2.enumerateDevices());
     }
 
+    //Get the serial number
+
     this->serial = this->freenect2.getDefaultDeviceSerialNumber();
     
+    //Open the device with the selected pipeline or with no pipeline
     if(this->pipeline)
     {
         this->dev = this->freenect2.openDevice(this->serial, this->pipeline);
@@ -38,6 +46,7 @@ Kinect2Node::Kinect2Node() : Node("kinect2_node"), listener(defaultSyncType)
         this->dev = this->freenect2.openDevice(this->serial);
     }
 
+    //Check to see if the device was opened
     if(this->dev == 0)
     {
         RCLCPP_ERROR(this->get_logger(), "Failed to open Kinect device!");
@@ -48,35 +57,44 @@ Kinect2Node::Kinect2Node() : Node("kinect2_node"), listener(defaultSyncType)
         RCLCPP_INFO(this->get_logger(), "Opened Kinect device");
     }
 
+    //Start the device
     RCLCPP_INFO(this->get_logger(), "Starting Kinect device");
 
+    //Parameters that control which streams are enabled
     this->enableRGB = this->declare_parameter<bool>("enable_rgb", true);
     this->enableDepth = this->declare_parameter<bool>("enable_depth", true);
 
+    //Enable the streams that were selected
     int types = 0;
     if(enableRGB)
         types |= libfreenect2::Frame::Color;
     if(enableDepth)
         types |= libfreenect2::Frame::Ir | libfreenect2::Frame::Depth;
+    
+    //If neither stream was selected then an exception will be thrown
     if(types == 0)
     {
         RCLCPP_ERROR(this->get_logger(), "No data types enabled!");
+        this->dev->close();
         throw std::invalid_argument("No data types enabled!");
     }
 
+    //Set the desired streams
     this->listener.emplace(types);
-
     this->dev->setColorFrameListener(&(*this->listener));
     this->dev->setIrAndDepthFrameListener(&(*this->listener));
     
+    //Start the device
     if(!this->dev->start())
     {
         RCLCPP_ERROR(this->get_logger(), "Failed to start Kinect device!");
+        this->dev->close();
         throw std::runtime_error("Failed to start Kinect device!");
     }
 
     RCLCPP_INFO(this->get_logger(), "Started Kinect device");
 
+    //Set up the regitration object
     this->registration = std::make_unique<libfreenect2::Registration>(this->dev->getIrCameraParams(), this->dev->getColorCameraParams());
 
     // Initialize publishers
@@ -92,16 +110,19 @@ Kinect2Node::Kinect2Node() : Node("kinect2_node"), listener(defaultSyncType)
     this->timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<int>(1000.0 / updateRate)),
                                      std::bind(&Kinect2Node::timerCallback, this));
 
+    //Get the camera calibration parameters
     this->cameraInfoDMatrix = this->declare_parameter<std::vector<double>>("camera_info_d", {0.012947732047700113, -0.016278227805096242, 0.0020719045565612245, -0.0012254560479249, 0.0});
     this->cameraInfoKMatrix = this->declare_parameter<std::vector<double>>("camera_info_k", {362.02061428537024, 0.0, 210.76517637501865, 0.0, 405.17059240104345, 211.97321671296146, 0.0, 0.0, 1.0});
     this->cameraInfoRMatrix = this->declare_parameter<std::vector<double>>("camera_info_r", {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0 ,0.0, 1.0});
     this->cameraInfoPMatrix = this->declare_parameter<std::vector<double>>("camera_info_p", {361.9730224609375, 0.0, 209.32856710752822, 0.0, 0.0, 405.724365234375, 212.33942579256836, 0.0, 0.0, 0.0, 1.0, 0.0});
     this->kinect2_link_frame_id = this->declare_parameter<std::string>("kinect2_link_frame_id", "kinect2_link");
 
+    //Get the image dimensions
     this->imageWidth = this->declare_parameter<double>("image_width", 512.0);
     this->imageHeight = this->declare_parameter<double>("image_height", 424.0);
     this->imageDepth = this->declare_parameter<double>("image_depth", 4.0);
 
+    //Create the undistorted and registered frames
     this->undistorted.emplace(this->imageWidth, this->imageHeight, this->imageDepth);
     this->registered.emplace(this->imageWidth, this->imageHeight, this->imageDepth);
 
@@ -117,7 +138,7 @@ Kinect2Node::~Kinect2Node()
     //Close device if it was initialized
     if(this->deviceFound)
     {
-        (*this->listener).release(this->frames);
+        this->listener->release(this->frames);
         this->dev->stop();
         this->dev->close();
     }
@@ -127,12 +148,14 @@ Kinect2Node::~Kinect2Node()
 
 void Kinect2Node::timerCallback()
 {
-    if(!(*this->listener).waitForNewFrame(this->frames, 10*1000))
+    //Get frame from device
+    if(!this->listener->waitForNewFrame(this->frames, 10*1000))
     {
         RCLCPP_ERROR(this->get_logger(), "Timed out waiting for Kinect data!");
         return;
     }
 
+    //Map the frames to the correct variables based on which streams are enabled
     libfreenect2::Frame *rgb, *ir, *depth;
     if(this->enableRGB)
     {
@@ -144,11 +167,13 @@ void Kinect2Node::timerCallback()
         depth = frames[libfreenect2::Frame::Depth];
     }
 
+    //If both rgb and depth are running, get the mapped frames
     if(this->enableRGB && this->enableDepth)
     {
         this->registration->apply(rgb, depth, &(*this->undistorted), &(*this->registered));
     }
 
+    //If RGB is enabled, publish the rgb frame
     if(this->enableRGB)
     {
         //Publish RGB image
@@ -165,6 +190,7 @@ void Kinect2Node::timerCallback()
         this->rgb_pub_->publish(std::move(rgb_msg));
     }
 
+    //If depth is enabeld, publish the depth and IR frames
     if(this->enableDepth)
     {
         //Publish IR image
@@ -195,18 +221,19 @@ void Kinect2Node::timerCallback()
         this->depth_pub_->publish(std::move(depth_msg));
     }
 
+    //If both RGB and Depth are enabled, publish the mapped frames
     if(this->enableRGB && this->enableDepth)
     {
         //Publish Undistorted Depth Image
         auto depth_rect_msg = std::make_unique<sensor_msgs::msg::Image>();
         depth_rect_msg->header.frame_id = this->kinect2_link_frame_id;
         depth_rect_msg->header.stamp = this->now();
-        depth_rect_msg->height = (this->undistorted)->height;
-        depth_rect_msg->width = (this->undistorted)->width;
-        depth_rect_msg->step = (this->undistorted)->bytes_per_pixel * (this->undistorted)->width;
+        depth_rect_msg->height = this->undistorted->height;
+        depth_rect_msg->width = this->undistorted->width;
+        depth_rect_msg->step = this->undistorted->bytes_per_pixel * this->undistorted->width;
         depth_rect_msg->encoding = sensor_msgs::image_encodings::TYPE_32FC1;
         depth_rect_msg->data.resize(depth_rect_msg->step * depth_rect_msg->height);
-        memcpy(&depth_rect_msg->data[0], (this->undistorted)->data, depth_rect_msg->step * depth_rect_msg->height);
+        memcpy(&depth_rect_msg->data[0], this->undistorted->data, depth_rect_msg->step * depth_rect_msg->height);
 
         this->depth_rect_pub_->publish(std::move(depth_rect_msg));
 
@@ -215,12 +242,12 @@ void Kinect2Node::timerCallback()
         auto rgb_rect_msg = std::make_unique<sensor_msgs::msg::Image>();
         rgb_rect_msg->header.frame_id = this->kinect2_link_frame_id;
         rgb_rect_msg->header.stamp = this->now();
-        rgb_rect_msg->height = (this->registered)->height;
-        rgb_rect_msg->width = (this->registered)->width;
-        rgb_rect_msg->step = (this->registered)->bytes_per_pixel * (this->registered)->width;
+        rgb_rect_msg->height = this->registered->height;
+        rgb_rect_msg->width = this->registered->width;
+        rgb_rect_msg->step = this->registered->bytes_per_pixel * this->registered->width;
         rgb_rect_msg->encoding = sensor_msgs::image_encodings::BGRA8;
         rgb_rect_msg->data.resize(rgb_rect_msg->step * rgb_rect_msg->height);
-        memcpy(&rgb_rect_msg->data[0], (this->registered)->data, rgb_rect_msg->step * rgb_rect_msg->height);
+        memcpy(&rgb_rect_msg->data[0], this->registered->data, rgb_rect_msg->step * rgb_rect_msg->height);
 
         this->rgb_rect_pub_->publish(std::move(rgb_rect_msg));
     }
@@ -240,11 +267,12 @@ void Kinect2Node::timerCallback()
 
     this->camera_info_pub_->publish(std::move(camera_info_msg));
 
-    (*this->listener).release(this->frames);
+    this->listener->release(this->frames);
 }
 
 void Kinect2Node::createPacketPipeline(std::string pipelineType)
 {
+    //Create pipeline based on parameter input and availability of the pipeline
     if(pipelineType == "cpu")
     {
         RCLCPP_INFO(this->get_logger(), "Using CPU pipeline");
